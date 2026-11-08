@@ -1,0 +1,33 @@
+{
+  "id": "bingebang",
+  "name": "BingeBang",
+  "version": "1.1.0",
+  "apiVersion": 6,
+  "entry": "plugin.js",
+  "description": "Peliculas y series de bingebang.st. Catalogo + reproduccion via API player/sources.",
+  "author": "community",
+  "homepage": "https://bingebang.st",
+  "hosts": [
+    "bingebang.st",
+    "www.bingebang.st",
+    "bingebang.to",
+    "bingebang.pw",
+    "bingebang.sx",
+    "image.tmdb.org",
+    "www.image.tmdb.org"
+  ],
+  "streamHosts": "any",
+  "capabilities": [
+    "search",
+    "home",
+    "browse",
+    "episodes",
+    "resolve",
+    "download"
+  ],
+  "categories": [
+    "movies",
+    "series"
+  ],
+  "color": "#8B5CF6"
+}
