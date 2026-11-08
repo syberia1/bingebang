@@ -1,6 +1,8 @@
-# BingeBang for Kino 1.1.0
+# BingeBang for Kino 1.2.0
 
-- Catalogo: `/api/list/*`, `/api/search/multi`, `/api/tv/{id}/season/{n}`
-- Video: `/api/player/sources?type=&id=` (+ season/episode)
+- Catalogo via `/api/*`
+- Video: `kino.browser.capture` sobre `/movie/play/...` o `/tv/play/...`
+- Fallback: `/api/player/sources`
 
-En IPs de VPN/datacenter el sitio pide Cloudflare Turnstile; en red domestica normal suele dejar pasar sin captcha.
+Requiere aceptar el permiso **navegador oculto** (en rojo) al instalar.
+Kino >= 0.9.50

@@ -1,10 +1,10 @@
 {
   "id": "bingebang",
   "name": "BingeBang",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "apiVersion": 6,
   "entry": "plugin.js",
-  "description": "Peliculas y series de bingebang.st. Catalogo + reproduccion via API player/sources.",
+  "description": "Peliculas y series de bingebang.st. Video via navegador oculto del player.",
   "author": "community",
   "homepage": "https://bingebang.st",
   "hosts": [
@@ -17,6 +17,7 @@
     "www.image.tmdb.org"
   ],
   "streamHosts": "any",
+  "browser": true,
   "capabilities": [
     "search",
     "home",

@@ -1,7 +1,8 @@
 /**
- * BingeBang for Kino 1.1.0
- * https://bingebang.st — public /api/* catalog; streams via /api/player/sources
- * (Turnstile gate only on VPN/datacenter IPs; normal networks skip it.)
+ * BingeBang for Kino 1.2.0
+ * Catalog: /api/*
+ * Video: kino.browser.capture on /movie/play or /tv/play (real player network)
+ *         + fallback /api/player/sources
  */
 const BASE = "https://bingebang.st";
 const IMG = "https://image.tmdb.org/t/p/";
@@ -152,9 +153,7 @@ export async function home() {
       log("home fail", s.id, (e && e.message) || e);
     }
   }
-  if (!rows.length) {
-    throw err("unavailable", "empty home", "BingeBang no devolvio catalogo.");
-  }
+  if (!rows.length) throw err("unavailable", "empty home", "BingeBang no devolvio catalogo.");
   return rows;
 }
 
@@ -295,89 +294,64 @@ export async function episodes(ref) {
   return { series: series, episodes: list };
 }
 
-/** Pull playable URLs from flexible /api/player/sources JSON. */
 function collectStreams(j) {
   const out = [];
   const seen = {};
-
   function add(url, label, headers) {
     if (!url || typeof url !== "string") return;
     url = url.trim();
     if (url.indexOf("//") === 0) url = "https:" + url;
     if (url.indexOf("http") !== 0) return;
+    if (/turnstile|cloudflare\.com\/cdn-cgi|google-analytics|googletag/i.test(url)) return;
     if (seen[url]) return;
     seen[url] = true;
     const s = { url: url, label: String(label || "Server").slice(0, 80) };
     if (headers) s.headers = headers;
     out.push(s);
   }
-
   function walk(node, labelHint) {
     if (!node) return;
     if (Array.isArray(node)) {
       for (let i = 0; i < node.length; i++) walk(node[i], labelHint);
       return;
     }
-    if (typeof node !== "object") {
-      if (typeof node === "string" && /^https?:\/\//i.test(node)) add(node, labelHint || "Server");
+    if (typeof node === "string") {
+      if (/^https?:\/\//i.test(node)) add(node, labelHint || "Server");
       return;
     }
+    if (typeof node !== "object") return;
     const label =
-      node.name ||
-      node.title ||
-      node.server ||
-      node.label ||
-      node.provider ||
-      node.quality ||
-      labelHint ||
-      "Server";
+      node.name || node.title || node.server || node.label || node.provider || node.quality || labelHint || "Server";
     const url =
-      node.url ||
-      node.src ||
-      node.file ||
-      node.stream ||
-      node.link ||
-      node.href ||
-      node.playlist ||
-      node.m3u8 ||
-      node.embed;
+      node.url || node.src || node.file || node.stream || node.link || node.href || node.playlist || node.m3u8 || node.embed;
     if (url) add(url, label, node.headers || null);
-    // nested
-    const kids = [
-      "sources",
-      "servers",
-      "streams",
-      "embeds",
-      "results",
-      "data",
-      "items",
-      "list",
-      "files",
-      "links",
-      "downloads"
-    ];
+    const kids = ["sources", "servers", "streams", "embeds", "results", "data", "items", "list", "files", "links", "downloads", "media"];
     for (let k = 0; k < kids.length; k++) {
       if (node[kids[k]]) walk(node[kids[k]], label);
     }
   }
-
   walk(j, "Server");
   return out;
 }
 
-export async function resolve(ref) {
-  await null;
-  const p = parseRef(ref);
-  if (!p) throw err("not_found", "ref " + ref, "Enlace no valido.");
-  log("resolve", p.type, p.id, "s" + p.season + "e" + p.episode);
-
-  // Confirm title exists
-  const detail = await apiGet(p.type + "/" + p.id);
-  if (!detail.json) {
-    throw err("not_found", "missing", "Titulo no encontrado en BingeBang.");
+function playUrlFor(detail, p) {
+  if (!detail) return "";
+  if (p.type === "movie") {
+    if (detail.play_url) return detail.play_url;
+    if (detail.url) return String(detail.url).replace("/watch/", "/play/");
+    return "";
   }
+  // TV episode
+  if (detail.play_url && /\/\d+\/\d+/.test(detail.play_url)) return detail.play_url;
+  let base = detail.play_url || detail.url || "";
+  base = String(base).replace("/watch/", "/play/");
+  // strip trailing /s/e if any then append
+  base = base.replace(/\/\d+\/\d+$/, "");
+  if (!base) return "";
+  return base + "/" + p.season + "/" + p.episode;
+}
 
-  // Primary: player sources API (works on normal IPs without captcha)
+async function resolveViaSourcesApi(p, detail) {
   let q =
     "player/sources?type=" +
     encodeURIComponent(p.type) +
@@ -390,97 +364,119 @@ export async function resolve(ref) {
       "&episode=" +
       encodeURIComponent(String(p.episode));
   }
-
   const playerHeaders = {
     "X-BB-Player": "1",
-    Referer: BASE + (detail.json.play_url || detail.json.url || "/"),
+    Referer: BASE + (detail.play_url || detail.url || "/"),
     Origin: BASE
   };
+  const src = await apiGet(q, playerHeaders);
+  log("sources status", src.status, (src.text || "").slice(0, 140));
+  if (src.json) return collectStreams(src.json);
+  return [];
+}
+
+async function resolveViaBrowser(playPath) {
+  if (!kino.browser || typeof kino.browser.capture !== "function") {
+    log("browser capture not available");
+    return [];
+  }
+  const url = playPath.indexOf("http") === 0 ? playPath : BASE + playPath;
+  log("browser capture", url);
+  try {
+    const page = await kino.browser.capture(url, {
+      timeoutMs: 28000,
+      captureAll: true,
+      match: "\\.m3u8|\\.mp4|/stream|manifest|playlist|video",
+      alsoMatch: ["\\.m3u8", "\\.mp4", "/embed/"]
+    });
+    const streams = [];
+    const media = (page && page.media) || [];
+    for (let i = 0; i < media.length; i++) {
+      const m = media[i];
+      if (!m || !m.url) continue;
+      if (/turnstile|cloudflare\.com\/cdn-cgi/i.test(m.url)) continue;
+      streams.push({
+        url: m.url,
+        label: "Server " + (i + 1),
+        headers: m.headers || { "User-Agent": UA, Referer: BASE + "/" }
+      });
+    }
+    // also scan generic requests
+    const reqs = (page && page.requests) || [];
+    for (let i = 0; i < reqs.length; i++) {
+      const r = reqs[i];
+      if (!r || !r.url) continue;
+      if (!/\.m3u8|\.mp4|\/stream|manifest|playlist/i.test(r.url)) continue;
+      if (/turnstile|cloudflare\.com\/cdn-cgi/i.test(r.url)) continue;
+      let already = false;
+      for (let j = 0; j < streams.length; j++) {
+        if (streams[j].url === r.url) {
+          already = true;
+          break;
+        }
+      }
+      if (!already) {
+        streams.push({
+          url: r.url,
+          label: "Stream",
+          headers: r.headers || { "User-Agent": UA, Referer: BASE + "/" }
+        });
+      }
+    }
+    log("browser streams", streams.length);
+    return streams;
+  } catch (e) {
+    log("browser fail", (e && e.code) || "", (e && e.message) || e);
+    return [];
+  }
+}
+
+export async function resolve(ref) {
+  await null;
+  const p = parseRef(ref);
+  if (!p) throw err("not_found", "ref " + ref, "Enlace no valido.");
+  log("resolve", p.type, p.id, "s" + p.season + "e" + p.episode);
+
+  const detailRes = await apiGet(p.type + "/" + p.id);
+  const detail = detailRes.json;
+  if (!detail) throw err("not_found", "missing", "Titulo no encontrado en BingeBang.");
+
+  // For TV, prefer episode play_url from season endpoint
+  if (p.type === "tv") {
+    try {
+      const sd = await apiGet("tv/" + p.id + "/season/" + p.season);
+      const eps = (sd.json && sd.json.episodes) || [];
+      for (let i = 0; i < eps.length; i++) {
+        if (parseInt(eps[i].episode_number, 10) === p.episode && eps[i].play_url) {
+          detail.play_url = eps[i].play_url;
+          break;
+        }
+      }
+    } catch (e) {}
+  }
 
   let streams = [];
-  const src = await apiGet(q, playerHeaders);
-  log("sources status", src.status, (src.text || "").slice(0, 160));
 
-  if (src.json) {
-    streams = collectStreams(src.json);
+  // 1) Fast path: API (may 403 from some networks)
+  try {
+    streams = await resolveViaSourcesApi(p, detail);
+  } catch (e) {
+    log("sources err", (e && e.message) || e);
   }
 
-  // Alternate query shapes some builds use
-  if (!streams.length && p.type === "tv") {
-    const alt = await apiGet(
-      "player/sources?type=tv&id=" +
-        encodeURIComponent(p.id) +
-        "&s=" +
-        p.season +
-        "&e=" +
-        p.episode,
-      playerHeaders
-    );
-    log("sources alt", alt.status);
-    if (alt.json) streams = collectStreams(alt.json);
-  }
-
-  // Fallback: download links with page ticket (no turnstile on many networks)
+  // 2) Real player page via hidden browser (works when site allows without captcha)
   if (!streams.length) {
-    try {
-      const watchPath = detail.json.url || "/";
-      const htmlRes = await kino.fetch(BASE + watchPath, {
-        headers: {
-          "User-Agent": UA,
-          Accept: "text/html",
-          Referer: BASE + "/"
-        }
-      });
-      const html = bodyText(htmlRes);
-      const ticketM = /"ticket":"([^"]+)"/.exec(html);
-      const saltM = /"salt":"([^"]+)"/.exec(html);
-      const urlM = /"url":"(\/api\/[^"]+)"/.exec(html);
-      if (ticketM && saltM && urlM) {
-        let apiUrl = urlM[1];
-        if (p.type === "tv") {
-          apiUrl +=
-            (apiUrl.indexOf("?") >= 0 ? "&" : "?") +
-            "season=" +
-            p.season +
-            "&episode=" +
-            p.episode;
-        }
-        const body = JSON.stringify({ ticket: ticketM[1], salt: saltM[1] });
-        const r = await kino.fetch(BASE + apiUrl, {
-          method: "POST",
-          headers: {
-            "User-Agent": UA,
-            "Content-Type": "application/json",
-            Accept: "application/json",
-            Origin: BASE,
-            Referer: BASE + watchPath
-          },
-          body: body
-        });
-        const t = bodyText(r);
-        log("download links", r && r.status, (t || "").slice(0, 120));
-        try {
-          const j = JSON.parse(t || "{}");
-          streams = collectStreams(j);
-        } catch (e2) {}
-      }
-    } catch (e) {
-      log("ticket fallback", (e && e.message) || e);
+    const playPath = playUrlFor(detail, p);
+    if (playPath) {
+      streams = await resolveViaBrowser(playPath);
     }
   }
 
   if (!streams.length) {
-    if (src.status === 403 || (src.json && src.json.error === "forbidden")) {
-      throw err(
-        "unavailable",
-        "player forbidden",
-        "BingeBang bloqueo la API de video (403). Si usas VPN, desactivala; en red normal deberia funcionar."
-      );
-    }
     throw err(
       "unavailable",
       "no streams",
-      "Sin servidores de video para este titulo en BingeBang."
+      "No se pudo obtener video. Si usas VPN desactivala y reintenta. Acepta el permiso del navegador oculto al instalar."
     );
   }
 
